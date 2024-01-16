@@ -344,6 +344,12 @@ class pcp2elasticsearch(object):
             self.es_failed = True
 
     def execute(self):
+        report_only = False
+
+        if self.es_failed:
+            sys.stdout.write("ES connection failed\n")
+            report_only = True
+
         """ Fetch and report """
         # Debug
         if self.context.pmDebug(PM_DEBUG_APPL1):
@@ -390,21 +396,21 @@ class pcp2elasticsearch(object):
                 break
 
             # Report and prepare for the next round
-            self.report(self.pmfg_ts())
+            self.report(self.pmfg_ts(), report_only)
             if self.samples and self.samples > 0:
                 self.samples -= 1
             if self.delay and self.interpol and self.samples != 0:
                 self.pmconfig.pause()
 
         # Allow to flush buffered values / say goodbye
-        self.report(None)
+        self.report(None, report_only)
 
-    def report(self, tstamp):
+    def report(self, tstamp, report_only=False):
         """ Report metric values """
         if tstamp is not None:
             tstamp = tstamp.strftime(self.timefmt)
 
-        self.write_es(tstamp)
+        self.write_es(tstamp, report_only)
 
     def write_header(self):
         """ Write info header """
@@ -421,7 +427,7 @@ class pcp2elasticsearch(object):
         else:
             sys.stdout.write("...\n(Ctrl-C to stop)\n")
 
-    def write_es(self, timestamp):
+    def write_es(self, timestamp, report_only):
         """ Write (send) metrics to Elasticsearch host """
         if timestamp is None:
             # Silent goodbye
@@ -429,25 +435,28 @@ class pcp2elasticsearch(object):
 
         ts = self.context.datetime_to_secs(self.pmfg_ts(), PM_TIME_MSEC)
 
-        try:
-            body = {'ignore': 400,
-                    'mappings': {'pcp-metric':
-                                {'properties':{'@timestamp':{'type':'epoch_milli'},
-                                               '@host-id':{'type':'string'}}}}}
-            data = json.dumps(body).encode('utf-8')
-            headers = {'content-type': 'application/json'}
-            url = self.es_server + '/' + self.es_index
-            req = httprequest.Request(url=url, data=data, headers=headers, method='PUT')
-            with httprequest.urlopen(req) as f:
-                f.close()
-            if self.es_failed:
-                sys.stderr.write("Reconnected to Elasticsearch server %s.\n" % (self.es_server))
-            self.es_failed = False
-        except Exception as put_failed:
-            if not self.es_failed:
-                sys.stderr.write("Cannot connect to Elasticsearch server %s: %s, continuing.\n" % (self.es_server, str(put_failed)))
-            self.es_failed = True
-            return
+        if report_only:
+            sys.stdout.write("Only printing report to stdout\n")
+        else:
+            try:
+                body = {'ignore': 400,
+                        'mappings': {'pcp-metric':
+                                    {'properties':{'@timestamp':{'type':'epoch_milli'},
+                                                '@host-id':{'type':'string'}}}}}
+                data = json.dumps(body).encode('utf-8')
+                headers = {'content-type': 'application/json'}
+                url = self.es_server + '/' + self.es_index
+                req = httprequest.Request(url=url, data=data, headers=headers, method='PUT')
+                with httprequest.urlopen(req) as f:
+                    f.close()
+                if self.es_failed:
+                    sys.stderr.write("Reconnected to Elasticsearch server %s.\n" % (self.es_server))
+                self.es_failed = False
+            except Exception as put_failed:
+                if not self.es_failed:
+                    sys.stderr.write("Cannot connect to Elasticsearch server %s: %s, continuing.\n" % (self.es_server, str(put_failed)))
+                self.es_failed = True
+                return
 
         # Assemble all metrics into a single document
         # Use @-prefixed keys for metadata not coming in from PCP metrics
@@ -513,21 +522,24 @@ class pcp2elasticsearch(object):
                         else:
                             insts.append({inst_key: name, last_part: value})
 
-        try:
-            data = json.dumps(es_doc).encode('utf-8')
-            url = self.es_server + '/' + self.es_index + '/' + self.es_search_type
-            req = httprequest.Request(url=url, data=data, headers=headers, method='POST')
-            with httprequest.urlopen(req) as f:
-                f.close()
-            if self.es_failed:
-                sys.stderr.write("Reconnected to Elasticsearch server %s.\n" % (self.es_server))
-            self.es_failed = False
+        if report_only:
+            sys.stdout.write(json.dumps(es_doc) + "\n")
+        else:
+            try:
+                data = json.dumps(es_doc).encode('utf-8')
+                url = self.es_server + '/' + self.es_index + '/' + self.es_search_type
+                req = httprequest.Request(url=url, data=data, headers=headers, method='POST')
+                with httprequest.urlopen(req) as f:
+                    f.close()
+                if self.es_failed:
+                    sys.stderr.write("Reconnected to Elasticsearch server %s.\n" % (self.es_server))
+                self.es_failed = False
 
-        except Exception as post_failed:
-            if not self.es_failed:
-                sys.stderr.write("Cannot send to Elasticsearch server %s: %s, continuing.\n" % (self.es_server, str(post_failed)))
-            self.es_failed = True
-            return
+            except Exception as post_failed:
+                if not self.es_failed:
+                    sys.stderr.write("Cannot send to Elasticsearch server %s: %s, continuing.\n" % (self.es_server, str(post_failed)))
+                self.es_failed = True
+                return
 
     def finalize(self):
         """ Finalize and clean up """
